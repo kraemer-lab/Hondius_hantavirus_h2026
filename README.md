@@ -16,4 +16,6 @@ This data is made available under the **Creative Commons Attribution 4.0 Interna
 
 ## Data
 
-Data are curated from multiple sources linked to each case in the line list. Please cite: "Global.health: Hondius hantavirus 2026 outbreak data [YYYY-MM-DD]"
+Data are curated from multiple sources linked to each case in the line list. Please cite: "Global.health: Hondius hantavirus 2026 outbreak data [YYYY-MM-DD]" 
+
+We will continue to work on formatting and adding additional details over the coming days.
