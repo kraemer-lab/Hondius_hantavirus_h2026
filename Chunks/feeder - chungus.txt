@@ -1,0 +1,2311 @@
+================================================================================
+  THE GIANT CHUNGUS
+  Project : SpiralWatch_v3
+  Root    : /home/loginname/Documents/SpiralWatch/spiralwatch_feeder
+  Files   : 7
+================================================================================
+
+
+TABLE OF CONTENTS
+----------------------------------------
+    1.  assembler.py
+    2.  feeder_pipeline.py
+    3.  run.py
+    4.  wound_classifier.py
+    5.  analytics/account_scorer.py
+    6.  analytics/wound_classifier.py
+    7.  scrapers/bluesky_client.py
+
+================================================================================
+
+
+================================================================================
+  FILE : assembler.py
+  EXT  : .py
+================================================================================
+
+#!/usr/bin/env python3
+"""
+assembler.py
+Crawls SpiralWatch_v3 and concatenates every source file
+into one enormous block of code.
+"""
+
+import os
+from pathlib import Path
+
+# ── Configuration ──────────────────────────────────────────────────────────────
+
+PROJECT_ROOT = Path("/home/loginname/Documents/SpiralWatch/spiralwatch_feeder/")
+
+OUTPUT_FILE = Path("/home/loginname/Documents/SpiralWatch/CHUNGUS_Feeder.txt")
+
+# Extensions to include
+INCLUDE_EXTENSIONS = {".py", ".ts", ".tsx"}
+
+# Files or directories to skip entirely
+SKIP_NAMES = {
+    "__pycache__",
+    ".git",
+    ".venv",
+    "venv",
+    "node_modules",
+    ".mypy_cache",
+    ".pytest_cache",
+    "dist",
+    "build",
+}
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+DIVIDER = "=" * 80
+
+
+def banner(filepath: Path) -> str:
+    """Return a readable section header for each file."""
+    rel = filepath.relative_to(PROJECT_ROOT)
+    lines = [
+        "",
+        DIVIDER,
+        f"  FILE : {rel}",
+        f"  EXT  : {filepath.suffix}",
+        DIVIDER,
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def collect_files(root: Path) -> list[Path]:
+    """
+    Walk the project tree and return all matching source files,
+    sorted so the output is deterministic.
+    """
+    collected: list[Path] = []
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Prune unwanted directories in-place so os.walk skips them
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_NAMES)
+
+        for fname in sorted(filenames):
+            fpath = Path(dirpath) / fname
+            if fpath.suffix in INCLUDE_EXTENSIONS and fname not in SKIP_NAMES:
+                collected.append(fpath)
+
+    return collected
+
+
+def read_safe(fpath: Path) -> str:
+    """Read a file, falling back gracefully on encoding errors."""
+    try:
+        return fpath.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return fpath.read_text(encoding="latin-1", errors="replace")
+
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+
+
+def assemble():
+    files = collect_files(PROJECT_ROOT)
+
+    if not files:
+        print("⚠  No source files found – check PROJECT_ROOT.")
+        return
+
+    total_lines = 0
+    total_chars = 0
+    file_count = 0
+    chunks: list[str] = []
+
+    # ── Master header ──────────────────────────────────────────────────────────
+    chunks.append(
+        f"{DIVIDER}\n"
+        f"  THE GIANT CHUNGUS\n"
+        f"  Project : SpiralWatch_v3\n"
+        f"  Root    : {PROJECT_ROOT}\n"
+        f"  Files   : {len(files)}\n"
+        f"{DIVIDER}\n"
+    )
+
+    # ── Table of contents ──────────────────────────────────────────────────────
+    toc_lines = ["", "TABLE OF CONTENTS", "-" * 40]
+    for i, fp in enumerate(files, 1):
+        toc_lines.append(f"  {i:>3}.  {fp.relative_to(PROJECT_ROOT)}")
+    toc_lines += ["", DIVIDER, ""]
+    chunks.append("\n".join(toc_lines))
+
+    # ── File contents ──────────────────────────────────────────────────────────
+    for fpath in files:
+        content = read_safe(fpath)
+        n_lines = content.count("\n")
+
+        total_lines += n_lines
+        total_chars += len(content)
+        file_count += 1
+
+        chunks.append(banner(fpath))
+        chunks.append(content)
+
+        print(f"  ✓  {fpath.relative_to(PROJECT_ROOT)}  ({n_lines} lines)")
+
+    # ── Footer ─────────────────────────────────────────────────────────────────
+    chunks.append(
+        f"\n{DIVIDER}\n"
+        f"  END OF CHUNGUS\n"
+        f"  Files assembled : {file_count}\n"
+        f"  Total lines     : {total_lines:,}\n"
+        f"  Total chars     : {total_chars:,}\n"
+        f"{DIVIDER}\n"
+    )
+
+    # ── Write output ───────────────────────────────────────────────────────────
+    final_text = "\n".join(chunks)
+    OUTPUT_FILE.write_text(final_text, encoding="utf-8")
+
+    print()
+    print(f"{'─' * 60}")
+    print("  🐘  CHUNGUS ASSEMBLED")
+    print(f"  Output  : {OUTPUT_FILE}")
+    print(f"  Files   : {file_count}")
+    print(f"  Lines   : {total_lines:,}")
+    print(
+        f"  Size    : {len(final_text):,} bytes ({len(final_text) / 1_048_576:.2f} MB)"
+    )
+    print(f"{'─' * 60}")
+
+
+if __name__ == "__main__":
+    assemble()
+
+
+================================================================================
+  FILE : feeder_pipeline.py
+  EXT  : .py
+================================================================================
+
+"""
+feeder_pipeline.py — End-to-end Feeder Node Identification Pipeline
+
+Seeds in. Feeder nodes out.
+
+Pipeline:
+  1. Seed resolution     — keyword / URL / handle → post set
+  2. Reply graph pull    — collect all accounts engaging with seed posts
+  3. Signal collection   — for each account: posts, audience sample, reply graph
+  4. Scoring             — triple signal: ARI × EAS × WCS
+  5. Output              — ranked feeder node list
+
+This is the thing that turns a hunch into a dataset.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Dict, Iterator, List, Optional, Set
+
+from scrapers.bluesky_client import BlueSkyClient, BSkyPost, BSkyAuthor
+from analytics.wound_classifier import WoundClassifier, WoundType
+from analytics.account_scorer import AccountScorer, AccountSignals, FeederNodeScore
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PipelineConfig:
+    # Seed collection
+    seed_post_limit: int = 50          # posts to pull per keyword search
+    seed_sort: str = "latest"          # 'latest' or 'top'
+
+    # Reply graph
+    thread_depth: int = 6              # how deep to go in reply trees
+    max_threads_per_seed: int = 20     # top N posts to pull threads for
+
+    # Account signal collection
+    post_sample_per_account: int = 30  # posts to sample per account
+    audience_sample_per_account: int = 50  # followers to sample
+
+    # Scoring
+    feeder_threshold: float = 0.45
+    top_k_output: int = 50
+
+    # Output
+    output_dir: str = "./output"
+    save_intermediates: bool = True
+
+
+class FeederNodePipeline:
+    """
+    Full pipeline from seed to feeder node list.
+
+    Usage:
+        pipeline = FeederNodePipeline(client, config)
+
+        # By keyword (wound theme)
+        feeders = pipeline.run_from_keyword("no one checks on men")
+
+        # By post URL
+        feeders = pipeline.run_from_post_url("https://bsky.app/profile/.../post/...")
+
+        # By known account (map their reply ecosystem)
+        feeders = pipeline.run_from_account("handle.bsky.social")
+    """
+
+    def __init__(
+        self,
+        client: BlueSkyClient,
+        config: Optional[PipelineConfig] = None,
+    ) -> None:
+        self.client = client
+        self.config = config or PipelineConfig()
+        self.wound_clf = WoundClassifier()
+        self.scorer = AccountScorer(
+            feeder_threshold=self.config.feeder_threshold
+        )
+        self._seen_dids: Set[str] = set()
+        Path(self.config.output_dir).mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Entry points
+    # ------------------------------------------------------------------
+
+    def run_from_keyword(self, query: str) -> List[FeederNodeScore]:
+        """Seed by keyword/phrase. Returns ranked feeder node list."""
+        logger.info("Pipeline starting — keyword seed: %r", query)
+
+        # Step 1: pull seed posts
+        seed_posts = list(self.client.search_posts(
+            query,
+            limit=self.config.seed_post_limit,
+            sort=self.config.seed_sort,
+        ))
+        logger.info("Pulled %d seed posts", len(seed_posts))
+
+        return self._run(seed_posts, label=query.replace(" ", "_")[:40])
+
+    def run_from_post_url(self, url: str) -> List[FeederNodeScore]:
+        """Seed from a single post URL."""
+        uri = self._url_to_uri(url)
+        if not uri:
+            logger.error("Could not resolve URL to AT URI: %s", url)
+            return []
+
+        thread = self.client.get_thread(uri, depth=self.config.thread_depth)
+        seed_posts = [thread["root"]] + thread["replies"] if thread["root"] else thread["replies"]
+        logger.info("Pulled thread with %d posts", len(seed_posts))
+
+        return self._run(seed_posts, label="post_seed")
+
+    def run_from_account(self, handle_or_did: str) -> List[FeederNodeScore]:
+        """Map the reply ecosystem around a known account."""
+        # Pull their recent posts as seeds
+        seed_posts = list(self.client.get_author_feed(
+            handle_or_did,
+            limit=self.config.seed_post_limit,
+        ))
+        logger.info(
+            "Pulled %d posts from account %s", len(seed_posts), handle_or_did
+        )
+        return self._run(seed_posts, label=handle_or_did.replace(".", "_")[:40])
+
+    # ------------------------------------------------------------------
+    # Core pipeline
+    # ------------------------------------------------------------------
+
+    def _run(self, seed_posts: List[BSkyPost], label: str) -> List[FeederNodeScore]:
+        """
+        Core pipeline: seed posts → reply graphs → signals → scores → feeders.
+        """
+        # Step 2: collect candidate accounts from reply graphs
+        candidates = self._collect_candidates(seed_posts)
+        logger.info("Collected %d candidate accounts", len(candidates))
+
+        if self.config.save_intermediates:
+            self._save_json(
+                [{"did": d, "handle": h} for d, h in candidates.items()],
+                f"candidates_{label}.json"
+            )
+
+        # Step 3: collect signals for each candidate
+        signals_list = []
+        for i, (did, handle) in enumerate(candidates.items()):
+            if i % 10 == 0:
+                logger.info("Collecting signals %d/%d", i, len(candidates))
+            try:
+                signals = self._collect_signals(did, handle)
+                signals_list.append(signals)
+            except Exception as e:
+                logger.warning("Signal collection failed for %s: %s", handle, e)
+
+        logger.info("Collected signals for %d accounts", len(signals_list))
+
+        # Step 4: score
+        feeder_scores = self.scorer.score_batch(signals_list)
+
+        # Step 5: filter and output
+        feeders = [s for s in feeder_scores if s.is_feeder_node][
+            :self.config.top_k_output
+        ]
+
+        logger.info(
+            "Identified %d feeder nodes from %d candidates",
+            len(feeders), len(candidates)
+        )
+
+        if self.config.save_intermediates:
+            self._save_json(
+                [f.to_dict() for f in feeders],
+                f"feeders_{label}.json"
+            )
+
+        self._print_summary(feeders)
+        return feeders
+
+    # ------------------------------------------------------------------
+    # Signal collection
+    # ------------------------------------------------------------------
+
+    def _collect_candidates(
+        self, seed_posts: List[BSkyPost]
+    ) -> Dict[str, str]:
+        """
+        From seed posts, collect candidate accounts via reply graphs.
+        Returns {did: handle} dict.
+        """
+        candidates: Dict[str, str] = {}
+
+        # Sort seed posts by engagement to prioritize
+        ranked = sorted(seed_posts, key=lambda p: p.engagement, reverse=True)
+        threads_to_pull = ranked[:self.config.max_threads_per_seed]
+
+        for post in threads_to_pull:
+            # Add the post author
+            if post.author_did and post.author_did not in candidates:
+                candidates[post.author_did] = post.author_handle
+
+            # Pull reply graph
+            if post.reply_count > 0:
+                try:
+                    thread = self.client.get_thread(
+                        post.uri,
+                        depth=self.config.thread_depth,
+                    )
+                    for reply in thread["replies"]:
+                        if reply.author_did and reply.author_did not in candidates:
+                            candidates[reply.author_did] = reply.author_handle
+                except Exception as e:
+                    logger.warning("Thread pull failed for %s: %s", post.uri, e)
+
+        return candidates
+
+    def _collect_signals(self, did: str, handle: str) -> AccountSignals:
+        """Collect all signals for a single account."""
+        signals = AccountSignals(did=did, handle=handle)
+
+        # Author profile
+        author = self.client.get_author(handle)
+        if author:
+            signals.followers_count = author.followers_count
+            signals.follows_count = author.follows_count
+            signals.posts_count = author.posts_count
+            signals.account_age_days = author.account_age_days
+
+        # Post sample + content scoring
+        posts = list(self.client.get_author_feed(
+            did, limit=self.config.post_sample_per_account
+        ))
+        signals.post_sample_size = len(posts)
+
+        if posts:
+            signals.mean_likes = sum(p.like_count for p in posts) / len(posts)
+            signals.mean_replies = sum(p.reply_count for p in posts) / len(posts)
+            signals.mean_reposts = sum(p.repost_count for p in posts) / len(posts)
+            signals.mean_quotes = sum(p.quote_count for p in posts) / len(posts)
+
+            # Wound classification
+            wound_scores = self.wound_clf.classify_batch([p.text for p in posts])
+            signals.wound_scores = wound_scores
+            signals.dominant_wound = self.wound_clf.dominant_wound(
+                [p.text for p in posts]
+            )
+
+        # Reply graph radicalization density
+        # Look at who replies to this account's posts and score them
+        reply_authors: List[str] = []
+        for post in posts[:5]:  # sample top 5 posts for reply graph
+            if post.reply_count > 0:
+                try:
+                    thread = self.client.get_thread(post.uri, depth=2)
+                    for reply in thread["replies"]:
+                        if reply.author_did != did:
+                            reply_authors.append(reply.text)
+                except Exception:
+                    pass
+
+        if reply_authors:
+            signals.reply_graph_size = len(reply_authors)
+            reply_wounds = self.wound_clf.classify_batch(reply_authors)
+            radical_count = sum(1 for ws in reply_wounds if ws.is_wound_content)
+            signals.reply_graph_radicalization_density = (
+                radical_count / len(reply_wounds)
+            )
+
+        # Audience sample
+        if signals.followers_count > 0:
+            sample_size = min(
+                self.config.audience_sample_per_account,
+                signals.followers_count,
+            )
+            try:
+                followers = list(self.client.get_followers(did, limit=sample_size))
+                signals.audience_sample_size = len(followers)
+                # Score follower bios + descriptions as wound content proxy
+                follower_texts = [
+                    f.description for f in followers if f.description
+                ]
+                if follower_texts:
+                    follower_wounds = self.wound_clf.classify_batch(follower_texts)
+                    radical_count = sum(
+                        1 for ws in follower_wounds if ws.is_wound_content
+                    )
+                    signals.audience_radicalization_density = (
+                        radical_count / len(follower_wounds)
+                    )
+            except Exception as e:
+                logger.warning("Audience sample failed for %s: %s", handle, e)
+
+        return signals
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+
+    def _url_to_uri(self, url: str) -> Optional[str]:
+        """
+        Convert a Bluesky web URL to an AT URI.
+        https://bsky.app/profile/handle.bsky.social/post/3k...
+        → at://did:plc:.../app.bsky.feed.post/3k...
+        """
+        try:
+            parts = url.rstrip("/").split("/")
+            handle = parts[parts.index("profile") + 1]
+            rkey = parts[parts.index("post") + 1]
+            author = self.client.get_author(handle)
+            if not author:
+                return None
+            return f"at://{author.did}/app.bsky.feed.post/{rkey}"
+        except Exception as e:
+            logger.error("URL resolution failed: %s", e)
+            return None
+
+    def _save_json(self, data: list, filename: str) -> None:
+        path = Path(self.config.output_dir) / filename
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+        logger.info("Saved %s", path)
+
+    def _print_summary(self, feeders: List[FeederNodeScore]) -> None:
+        if not feeders:
+            print("\n[FeederPipeline] No feeder nodes identified.\n")
+            return
+
+        print(f"\n{'='*60}")
+        print(f"  FEEDER NODE SUMMARY — {len(feeders)} identified")
+        print(f"{'='*60}")
+
+        for i, f in enumerate(feeders[:20], 1):
+            print(
+                f"  {i:2d}. @{f.handle:<30} "
+                f"composite={f.composite_score:.3f}  "
+                f"wound={f.dominant_wound.value}"
+            )
+            if f.flags:
+                print(f"      flags: {', '.join(f.flags[:3])}")
+
+        print(f"{'='*60}\n")
+
+
+__all__ = ["PipelineConfig", "FeederNodePipeline"]
+
+
+================================================================================
+  FILE : run.py
+  EXT  : .py
+================================================================================
+
+"""
+run.py — SpiralWatch Feeder Node Identifier
+Entry point.
+
+Usage:
+    # By keyword
+    python run.py --keyword "no one checks on men"
+
+    # By post URL
+    python run.py --post "https://bsky.app/profile/handle.bsky.social/post/..."
+
+    # By account
+    python run.py --account "handle.bsky.social"
+
+    # Authenticated (higher rate limits)
+    python run.py --keyword "loneliness men" --handle "your.handle" --password "app-password"
+
+    # Custom output dir
+    python run.py --keyword "blackpill" --output ./data/run_001
+"""
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
+
+from scrapers.bluesky_client import BlueSkyClient
+from feeder_pipeline import FeederNodePipeline, PipelineConfig
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="SpiralWatch Feeder Node Identifier — Bluesky"
+    )
+
+    # Seed options (mutually exclusive)
+    seed_group = parser.add_mutually_exclusive_group(required=True)
+    seed_group.add_argument("--keyword", "-k", help="Keyword/phrase to seed with")
+    seed_group.add_argument("--post", "-p", help="Post URL to seed from")
+    seed_group.add_argument("--account", "-a", help="Account handle to map")
+
+    # Auth (optional)
+    parser.add_argument("--handle", help="Bluesky handle for auth")
+    parser.add_argument("--password", help="Bluesky app password for auth")
+
+    # Pipeline config
+    parser.add_argument("--output", "-o", default="./output", help="Output directory")
+    parser.add_argument("--limit", "-l", type=int, default=50, help="Seed post limit")
+    parser.add_argument("--top-k", type=int, default=50, help="Top K feeders to output")
+    parser.add_argument("--threshold", type=float, default=0.45, help="Feeder score threshold")
+    parser.add_argument("--sort", choices=["latest", "top"], default="latest")
+
+    args = parser.parse_args()
+
+    # Build client
+    client = BlueSkyClient(
+        handle=args.handle,
+        app_password=args.password,
+    )
+
+    # Build config
+    config = PipelineConfig(
+        seed_post_limit=args.limit,
+        seed_sort=args.sort,
+        feeder_threshold=args.threshold,
+        top_k_output=args.top_k,
+        output_dir=args.output,
+        save_intermediates=True,
+    )
+
+    # Run pipeline
+    pipeline = FeederNodePipeline(client, config)
+
+    if args.keyword:
+        feeders = pipeline.run_from_keyword(args.keyword)
+    elif args.post:
+        feeders = pipeline.run_from_post_url(args.post)
+    elif args.account:
+        feeders = pipeline.run_from_account(args.account)
+
+    print(f"\nDone. {len(feeders)} feeder nodes written to {args.output}/")
+    print(f"Total API calls: {client.call_count}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+================================================================================
+  FILE : wound_classifier.py
+  EXT  : .py
+================================================================================
+
+WOUND_LEXICONS: Dict[WoundType, List[str]] = {
+    WoundType.LONELINESS: [
+        "no one checks on", "nobody checks on", "affection desert",
+        "touch starved", "touchstarved", "no one cares about men",
+        "men are disposable", "lonely", "isolation", "invisible",
+        "nobody loves", "died alone", "no one noticed",
+        "men don't get", "who checks on", "forgotten",
+        "friendless", "no one asks how i'm doing",
+        # New variations
+        "last hug", "haven't been hugged", "no hug in", "years without hug",
+        "haven't hugged", "no physical contact", "touch in years",
+        "haven't been touched", "years since anyone", "affection in years",
+        "completely alone", "talking to a wall", "no one reaches out",
+        "emotional desert", "starving for touch", "no human warmth",
+    ],
+
+    WoundType.HUMILIATION: [
+        "emasculated", "beta", "cuck", "cucked", "weak men",
+        "low value", "simp", "simping", "pathetic", "loser",
+        "you'll never be", "laughed at", "mocked", "degraded",
+        "embarrassed", "humiliated", "castrated", "spineless",
+        "men have become", "what happened to men",
+        # New
+        "made fun of", "publicly shamed", "looked down on",
+        "treated like trash", "worthless man", "not man enough",
+        "beta provider", "doormat", "walked over",
+    ],
+
+    WoundType.BETRAYAL: [
+        "they lied", "the media lied", "government lied",
+        "women are not", "false accusation", "false rape",
+        "men get nothing", "divorce rape", "family court",
+        "deep state", "they want you to", "wake up",
+        "you've been lied to", "red pill", "blackpill",
+        "blue pill", "clown world", "system is corrupt",
+        "trust no one", "they don't want you to know",
+        # New
+        "backstabbed", "sold out", "broken promises",
+        "institutions failed", "society betrayed", "they tricked us",
+    ],
+
+    WoundType.IMPOTENCE: [
+        "nothing matters", "why bother", "it's over",
+        "blackpill", "hopeless", "there's no point",
+        "rigged", "you can't win", "they control everything",
+        "voting doesn't matter", "nothing will change",
+        "give up", "doomed", "no future", "why try",
+        "mgtow", "going your own way", "monk mode",
+        # New
+        "pointless", "futility", "can't change anything",
+        "trapped in the system", "no escape", "it's hopeless",
+        "fighting a losing battle",
+    ],
+
+    WoundType.ENVY_SPITE: [
+        "while you were", "they get to", "unfair",
+        "affirmative action", "diversity hire", "privilege",
+        "they don't deserve", "why do they get",
+        "meritocracy is dead", "men built", "men invented",
+        "without men", "replaceable", "they took",
+        "stolen", "earned it unlike", "undeserved",
+        # New
+        "handed everything", "I struggle they get", "unfair advantage",
+        "they coast while we", "jealous of", "spiteful",
+    ],
+
+    WoundType.NOSTALGIA: [
+        "real men used to", "back when", "used to be",
+        "traditional values", "trad", "before feminism",
+        "make * great again", "old days", "simpler times",
+        "men used to", "women used to", "society used to",
+        "our culture", "western civilization", "heritage",
+        "replacement", "great replacement", "demographic",
+        # New
+        "in my day", "things were better", "lost era",
+        "how it used to be", "golden age", "decline of",
+    ],
+
+    WoundType.HATRED: [
+        "subhuman", "vermin", "parasite", "infestation",
+        "they're replacing", "white genocide", "demographic replacement",
+        "great replacement", "globalist", "zog",
+        "race traitor", "they all", "they always",
+        "those people", "of course it was a", "typical",
+        "deport", "send them back", "remove",
+        # New (use sparingly)
+        "scum", "invaders", "destroying us", "enemy within",
+    ],
+
+    WoundType.SEXUAL_EXPLOIT: [
+        "only fans", "onlyfans", "content creator",
+        "thirst trap", "nsfw", "leaked", "exclusive content",
+        "see more", "link in bio", "dm me", "18+",
+        "hot take", "would you", "rate me", "am i",
+        "female privilege", "using your body", "men are easy",
+        # New
+        "paypig", "findom", "financial domination",
+        "send tribute", "drain you", "simps pay",
+        "attention whore", "validation seeking",
+    ],
+}
+
+
+================================================================================
+  FILE : analytics/account_scorer.py
+  EXT  : .py
+================================================================================
+
+"""
+account_scorer.py — Feeder Node Account Scoring
+
+This is the core of the Feeder Node Identifier.
+
+An account is a feeder node if it scores high on the TRIPLE SIGNAL:
+  1. Audience Radicalization Index (ARI)  — who follows/replies
+  2. Engagement Anomaly Score (EAS)       — inverse ratio signal
+  3. Wound Content Score (WCS)            — wound type classification
+
+Any single signal produces false positives.
+The triple conjunction is the criterion.
+
+Account-level R₀:
+  How many accounts does this account infect with its behavior pattern?
+  Measured by: followers who adopt its vocabulary, framing, wound language
+  after following. Requires longitudinal data — approximated here by
+  reply graph radicalization density.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+from .wound_classifier import WoundClassifier, WoundScore, WoundType
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class AccountSignals:
+    """Raw signals collected for a single account."""
+
+    did: str
+    handle: str
+    followers_count: int = 0
+    follows_count: int = 0
+    posts_count: int = 0
+    account_age_days: float = 0.0
+
+    # Engagement signals (from their posts)
+    mean_likes: float = 0.0
+    mean_replies: float = 0.0
+    mean_reposts: float = 0.0
+    mean_quotes: float = 0.0
+    post_sample_size: int = 0
+
+    # Reply graph signals
+    reply_graph_size: int = 0                    # how many unique accounts replied
+    reply_graph_radicalization_density: float = 0.0  # fraction of repliers with wound content
+    reply_graph_wound_types: List[WoundType] = field(default_factory=list)
+
+    # Content signals
+    wound_scores: List[WoundScore] = field(default_factory=list)
+    dominant_wound: WoundType = WoundType.NEUTRAL
+
+    # Audience signals (sample of followers)
+    audience_sample_size: int = 0
+    audience_radicalization_density: float = 0.0
+
+
+@dataclass
+class FeederNodeScore:
+    """
+    Composite feeder node score for a single account.
+
+    All component scores normalized to [0, 1].
+    Triple signal conjunction = the criterion.
+    """
+
+    did: str
+    handle: str
+
+    # Component scores
+    audience_radicalization_index: float = 0.0   # ARI — who engages
+    engagement_anomaly_score: float = 0.0         # EAS — inverse ratio signal
+    wound_content_score: float = 0.0              # WCS — wound classification
+
+    # Composite
+    composite_score: float = 0.0
+    is_feeder_node: bool = False
+
+    # Interpretability
+    dominant_wound: WoundType = WoundType.NEUTRAL
+    wound_vector: List[float] = field(default_factory=list)
+    signals: Optional[AccountSignals] = None
+    flags: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict:
+        return {
+            "did": self.did,
+            "handle": self.handle,
+            "audience_radicalization_index": round(self.audience_radicalization_index, 4),
+            "engagement_anomaly_score": round(self.engagement_anomaly_score, 4),
+            "wound_content_score": round(self.wound_content_score, 4),
+            "composite_score": round(self.composite_score, 4),
+            "is_feeder_node": self.is_feeder_node,
+            "dominant_wound": self.dominant_wound.value,
+            "flags": self.flags,
+        }
+
+
+class AccountScorer:
+    """
+    Scores accounts on the triple feeder node signal.
+
+    Weights and thresholds are tunable — start conservative,
+    adjust as you collect ground truth from the field.
+
+    Usage:
+        scorer = AccountScorer()
+        score = scorer.score(signals)
+        if score.is_feeder_node:
+            collect(score)
+    """
+
+    def __init__(
+        self,
+        # Component weights for composite score
+        ari_weight: float = 0.40,
+        eas_weight: float = 0.30,
+        wcs_weight: float = 0.30,
+        # Feeder node threshold
+        feeder_threshold: float = 0.45,
+        # EAS parameters
+        engagement_anomaly_floor_followers: int = 50,
+        engagement_anomaly_ceiling_followers: int = 5000,
+        # ARI parameters
+        ari_min_reply_sample: int = 5,
+    ) -> None:
+        self.ari_weight = ari_weight
+        self.eas_weight = eas_weight
+        self.wcs_weight = wcs_weight
+        self.feeder_threshold = feeder_threshold
+        self.engagement_anomaly_floor = engagement_anomaly_floor_followers
+        self.engagement_anomaly_ceiling = engagement_anomaly_ceiling_followers
+        self.ari_min_reply_sample = ari_min_reply_sample
+        self._wound_clf = WoundClassifier()
+
+    # ------------------------------------------------------------------
+    # Component scorers
+    # ------------------------------------------------------------------
+
+    def _audience_radicalization_index(self, signals: AccountSignals) -> Tuple[float, List[str]]:
+        """
+        ARI — what fraction of the engaging audience shows wound content.
+
+        Primary source: reply graph radicalization density.
+        Secondary source: audience sample radicalization density.
+        Both weighted equally if both available.
+        """
+        flags = []
+        components = []
+
+        if signals.reply_graph_size >= self.ari_min_reply_sample:
+            components.append(signals.reply_graph_radicalization_density)
+            if signals.reply_graph_radicalization_density > 0.5:
+                flags.append(f"reply_graph_radical_density={signals.reply_graph_radicalization_density:.2f}")
+
+        if signals.audience_sample_size >= 10:
+            components.append(signals.audience_radicalization_density)
+            if signals.audience_radicalization_density > 0.4:
+                flags.append(f"audience_radical_density={signals.audience_radicalization_density:.2f}")
+
+        if not components:
+            return 0.0, flags
+
+        return float(sum(components) / len(components)), flags
+
+    def _engagement_anomaly_score(self, signals: AccountSignals) -> Tuple[float, List[str]]:
+        """
+        EAS — inverse engagement ratio signal.
+
+        The key insight: a small account with OUTSIZED engagement on
+        wound content is a feeder. This is different from a bot
+        (which has zero engagement) and different from a viral account
+        (which has proportionate engagement).
+
+        We're looking for the sweet spot:
+          - Followers: between floor and ceiling (not huge, not tiny)
+          - Engagement: anomalously high relative to follower count
+          - Content: wound-typed
+
+        Score is highest when:
+          - Follower count is in the sweet spot (50-5000)
+          - Mean engagement per post is > 2% of follower count
+          - Account is not obviously a bot
+        """
+        flags = []
+
+        fc = signals.followers_count
+        if fc < 10:
+            return 0.0, ["too_small_to_score"]
+
+        # Total mean engagement per post
+        mean_eng = (
+            signals.mean_likes
+            + signals.mean_replies
+            + signals.mean_reposts
+            + signals.mean_quotes
+        )
+
+        if mean_eng == 0:
+            return 0.0, ["zero_engagement"]
+
+        # Engagement rate as fraction of followers
+        eng_rate = mean_eng / max(1, fc)
+
+        # For a normal account: ~0.5-2% engagement rate
+        # For a feeder: often 5-40% on wound posts
+        # We want to flag > 3% as anomalous for accounts under 5k followers
+
+        # Scale: 0.03 → 0.0, 0.40 → 1.0 (logarithmic)
+        if eng_rate <= 0.03:
+            eng_anomaly = 0.0
+        elif eng_rate >= 0.40:
+            eng_anomaly = 1.0
+        else:
+            eng_anomaly = math.log(eng_rate / 0.03) / math.log(0.40 / 0.03)
+
+        # Size penalty: large accounts get reduced EAS
+        # We're looking for the small-but-resonant profile
+        if fc > self.engagement_anomaly_ceiling:
+            size_factor = max(0.1, 1.0 - (fc - self.engagement_anomaly_ceiling) / 50000)
+        elif fc < self.engagement_anomaly_floor:
+            size_factor = 0.5  # too small to trust signal
+        else:
+            size_factor = 1.0
+
+        # Reply-to-like ratio: high replies relative to likes = controversial/wound
+        # Wound content generates replies more than likes
+        if signals.mean_likes > 0:
+            reply_like_ratio = signals.mean_replies / signals.mean_likes
+            if reply_like_ratio > 0.3:
+                flags.append(f"high_reply_like_ratio={reply_like_ratio:.2f}")
+                eng_anomaly = min(1.0, eng_anomaly * 1.2)  # boost score
+
+        score = eng_anomaly * size_factor
+
+        if score > 0.5:
+            flags.append(f"eng_rate={eng_rate:.3f}_fc={fc}")
+
+        return float(score), flags
+
+    def _wound_content_score(self, signals: AccountSignals) -> Tuple[float, List[str]]:
+        """
+        WCS — what fraction of sampled posts contain wound content,
+        and how concentrated is it.
+        """
+        flags = []
+
+        if not signals.wound_scores:
+            return 0.0, ["no_content_sampled"]
+
+        wound_posts = [ws for ws in signals.wound_scores if ws.is_wound_content]
+        wound_fraction = len(wound_posts) / len(signals.wound_scores)
+
+        if wound_fraction == 0:
+            return 0.0, flags
+
+        # Mean wound density across wound posts
+        mean_density = sum(
+            sum(ws.scores.values()) for ws in wound_posts
+        ) / len(wound_posts)
+
+        # Concentration: does account focus on ONE wound type (more dangerous)
+        # vs scattershot across many?
+        if wound_posts:
+            wound_type_counts: Dict[WoundType, int] = {}
+            for ws in wound_posts:
+                if ws.dominant != WoundType.NEUTRAL:
+                    wound_type_counts[ws.dominant] = wound_type_counts.get(ws.dominant, 0) + 1
+            if wound_type_counts:
+                top_count = max(wound_type_counts.values())
+                concentration = top_count / len(wound_posts)
+                if concentration > 0.6:
+                    flags.append(f"wound_concentrated={signals.dominant_wound.value}")
+            else:
+                concentration = 0.0
+        else:
+            concentration = 0.0
+
+        score = wound_fraction * (0.7 + 0.3 * concentration)
+
+        if wound_fraction > 0.3:
+            flags.append(f"wound_fraction={wound_fraction:.2f}")
+
+        return float(min(1.0, score)), flags
+
+    # ------------------------------------------------------------------
+    # Composite scorer
+    # ------------------------------------------------------------------
+
+    def score(self, signals: AccountSignals) -> FeederNodeScore:
+        """
+        Compute composite feeder node score from collected signals.
+        """
+        ari, ari_flags = self._audience_radicalization_index(signals)
+        eas, eas_flags = self._engagement_anomaly_score(signals)
+        wcs, wcs_flags = self._wound_content_score(signals)
+
+        composite = (
+            self.ari_weight * ari
+            + self.eas_weight * eas
+            + self.wcs_weight * wcs
+        )
+
+        # Triple signal boost: if all three are above 0.3, amplify
+        if ari > 0.3 and eas > 0.3 and wcs > 0.3:
+            composite = min(1.0, composite * 1.25)
+
+        all_flags = ari_flags + eas_flags + wcs_flags
+        is_feeder = composite >= self.feeder_threshold
+
+        # Dominant wound from content
+        wound_vector = []
+        if signals.wound_scores:
+            clf = WoundClassifier()
+            texts = [ws.text for ws in signals.wound_scores]
+            agg_dominant = clf.dominant_wound(texts)
+            # Build vector
+            sample = signals.wound_scores[0] if signals.wound_scores else None
+            wound_vector = sample.wound_vector if sample else []
+        else:
+            agg_dominant = WoundType.NEUTRAL
+
+        return FeederNodeScore(
+            did=signals.did,
+            handle=signals.handle,
+            audience_radicalization_index=ari,
+            engagement_anomaly_score=eas,
+            wound_content_score=wcs,
+            composite_score=composite,
+            is_feeder_node=is_feeder,
+            dominant_wound=agg_dominant,
+            wound_vector=wound_vector,
+            signals=signals,
+            flags=all_flags,
+        )
+
+    def score_batch(self, signals_list: List[AccountSignals]) -> List[FeederNodeScore]:
+        scores = [self.score(s) for s in signals_list]
+        scores.sort(key=lambda x: -x.composite_score)
+        return scores
+
+    def top_feeders(
+        self,
+        signals_list: List[AccountSignals],
+        top_k: int = 20,
+    ) -> List[FeederNodeScore]:
+        scores = self.score_batch(signals_list)
+        return [s for s in scores if s.is_feeder_node][:top_k]
+
+
+__all__ = ["AccountSignals", "FeederNodeScore", "AccountScorer"]
+
+
+================================================================================
+  FILE : analytics/wound_classifier.py
+  EXT  : .py
+================================================================================
+
+"""
+wound_classifier.py — Social wound type classification
+Three-layer matching: regex patterns → fuzzy → semantic embedding
+
+Layer 1: Regex patterns     — fast, handles numerical variation, free
+Layer 2: Fuzzy matching     — handles paraphrase/spelling, free
+Layer 3: Semantic embedding — handles conceptual similarity, local model
+
+The lexicons are seed phrases and pattern anchors, not literal match targets.
+When feeders shift vocabulary, the embedding layer follows the meaning.
+"""
+
+from __future__ import annotations
+
+import re
+import logging
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# ── Semantic embedding (optional, graceful fallback) ──────────────────────────
+try:
+    from sentence_transformers import SentenceTransformer, util as st_util
+    import torch
+    _SEMANTIC_AVAILABLE = True
+except ImportError:
+    _SEMANTIC_AVAILABLE = False
+    logger.info(
+        "sentence-transformers not installed — semantic layer disabled. "
+        "pip install sentence-transformers to enable."
+    )
+
+# ── Fuzzy matching ────────────────────────────────────────────────────────────
+try:
+    from rapidfuzz import fuzz as _fuzz
+    _FUZZY_LIB = "rapidfuzz"
+except ImportError:
+    try:
+        from difflib import SequenceMatcher as _SM
+        _FUZZY_LIB = "difflib"
+    except ImportError:
+        _FUZZY_LIB = None
+
+FUZZY_THRESHOLD = 82      # % similarity for fuzzy match
+SEMANTIC_THRESHOLD = 0.72 # cosine similarity for embedding match
+SEMANTIC_MODEL = "all-MiniLM-L6-v2"
+
+
+class WoundType(str, Enum):
+    LONELINESS     = "loneliness"
+    HUMILIATION    = "humiliation"
+    BETRAYAL       = "betrayal"
+    IMPOTENCE      = "impotence"
+    ENVY_SPITE     = "envy_spite"
+    NOSTALGIA      = "nostalgia"
+    HATRED         = "hatred"
+    SEXUAL_EXPLOIT = "sexual_exploit"
+    NEUTRAL        = "neutral"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYER 1 — Regex patterns
+# Handles: numerical variation, tense variation, synonym families
+# Format: raw regex strings compiled at module load
+# ══════════════════════════════════════════════════════════════════════════════
+
+WOUND_PATTERNS: Dict[WoundType, List[str]] = {
+
+    WoundType.LONELINESS: [
+        # Touch/hug deprivation — the "last hug N years ago" family
+        r"(last|haven.t|no).{0,20}(hug|touch|held|embrace|affection).{0,20}(year|month|time|ago|since|long)",
+        r"\d+\s+years?\s+(without|since|no)\s+(hug|touch|affection|compliment|physical)",
+        r"(haven.t|have not|not been)\s+(hugged|touched|held|embraced)",
+        r"years?\s+since\s+(someone|anyone|a person|i was)",
+        r"last\s+(time|hug|touch|compliment|kind word).{0,30}(years?|months?|ago|since)",
+        r"no\s+(physical\s+)?(contact|touch|affection|connection)\s+(in|for)\s+\d+",
+
+        # Invisibility / nobody checks
+        r"no\s+one\s+(checks?|cares?|asks?|notices?|sees?)\s+(on\s+)?men",
+        r"nobody\s+(checks?|cares?|asks?|notices?)\s+(on\s+)?(men|us|me)",
+        r"men\s+are\s+(invisible|disposable|forgotten|alone)",
+        r"who\s+(checks?|asks?|cares?)\s+(on\s+)?men",
+        r"(affection|touch)\s+desert",
+        r"touch\s*starved",
+        r"(died|die|dying)\s+alone",
+        r"no\s+one\s+would\s+(notice|know|care)",
+
+        # Compliment deprivation
+        r"(first|only|last)\s+compliment.{0,30}(years?|life|ever|remember)",
+        r"\d+\s+compliments?\s+(in\s+my\s+life|ever|total)",
+        r"remember\s+every\s+compliment",
+        r"flowers\s+when\s+(they.re|i.m|you.re)\s+dead",
+
+        # Male loneliness epidemic framing
+        r"male\s+loneliness\s+(epidemic|crisis|problem)",
+        r"men\s+(don.t|do\s+not)\s+get\s+(hugs?|affection|touch|support)",
+        r"affection\s+desert",
+        r"(friendless|no\s+friends|without\s+friends).{0,20}(men|male|guy)",
+    ],
+
+    WoundType.HUMILIATION: [
+        r"(beta|cuck(ed)?|simp(ing)?)\s+(male|men|guy|behavior)",
+        r"low.?value\s+m[ae]n",
+        r"(emasculate[sd]?|emasculation)",
+        r"(weak|pathetic|spineless)\s+men",
+        r"what\s+happened\s+to\s+(real\s+)?men",
+        r"men\s+have\s+become",
+        r"(laughed|mocked|ridiculed)\s+at\s+(by\s+)?(women|society|her)",
+        r"(you.re\s+not|not\s+a)\s+real\s+man",
+        r"(castrated|neutered)\s+(men|males|society)",
+        r"(humiliat\w+).{0,30}(men|male|guy|husband)",
+        r"male\s+(disposability|expendability)",
+    ],
+
+    WoundType.BETRAYAL: [
+        r"(they|she|women|media|government)\s+(lied|deceived|betrayed)\s+(to\s+)?(men|us|you)",
+        r"you.ve\s+been\s+lied\s+to",
+        r"(red|blue)\s*pill(ed)?",
+        r"divorce\s+rape",
+        r"family\s+court\s+(bias|rigged|unfair|corrupt)",
+        r"false\s+(rape|accusation|allegation)",
+        r"(women|feminism)\s+(destroyed|ruined|broke)",
+        r"clown\s+world",
+        r"(deep|shadow)\s+state",
+        r"they\s+(don.t|do\s+not)\s+want\s+you\s+to\s+know",
+        r"(wake|woke)\s+up.{0,20}(sheep|men|people|guys)",
+        r"blackpill(ed)?",
+        r"men\s+get\s+nothing",
+        r"(trust|believe)\s+no\s+one",
+    ],
+
+    WoundType.IMPOTENCE: [
+        r"(it.s|its)\s+over",
+        r"blackpill(ed)?",
+        r"nothing\s+(matters|will\s+change|you\s+do)",
+        r"why\s+(bother|try|care|even)",
+        r"(system|game|life)\s+is\s+(rigged|broken|stacked)",
+        r"(no|without)\s+(future|hope|point)\s+(for\s+)?men",
+        r"(give|giving)\s+up.{0,20}(men|dating|women|life)",
+        r"mgtow",
+        r"going\s+your\s+own\s+way",
+        r"monk\s+mode",
+        r"looksmax(xing)?(\s+failed)?",
+        r"sub\s*[3-6]\s*(male|man|guy)?",
+        r"(doomed|hopeless).{0,20}(men|generation|society)",
+        r"voting\s+doesn.t\s+matter",
+        r"can.t\s+win.{0,20}(men|rigged|system)",
+    ],
+
+    WoundType.ENVY_SPITE: [
+        r"(diversity|affirmative\s+action)\s+hire",
+        r"(they|women|[a-z]+s)\s+(get|have|take)\s+(everything|it\s+all|more)",
+        r"(unfair|rigged)\s+(to|for|against)\s+men",
+        r"men\s+(built|invented|created)\s+(this|everything|civilization)",
+        r"without\s+men.{0,30}(nothing|collapse|fall)",
+        r"(undeserved|don.t\s+deserve).{0,20}(success|reward|men)",
+        r"hypergamy",
+        r"branch\s+swinging",
+        r"(stolen|took|taking)\s+(our|men.s|male)",
+        r"(male|men.s)\s+privilege\s+(myth|lie|fake)",
+        r"meritocracy\s+is\s+(dead|gone|fake)",
+    ],
+
+    WoundType.NOSTALGIA: [
+        r"(real|traditional)\s+men\s+used\s+to",
+        r"(women|men|things?|society)\s+used\s+to\s+be",
+        r"(before\s+feminism|pre.feminist)",
+        r"traditional\s+(values?|family|gender\s+roles?)",
+        r"trad(itional)?\s+(wife|women|girl)",
+        r"great\s+replacement",
+        r"demographic\s+replacement",
+        r"(our|western)\s+(culture|civilization|heritage)\s+(is\s+)?(dying|gone|lost|under\s+attack)",
+        r"make\s+\w+\s+great\s+again",
+        r"(simpler|better)\s+times",
+        r"(lost|losing)\s+(generation|masculinity|manhood)",
+        r"replacement\s+(migration|theory|level)",
+    ],
+
+    WoundType.HATRED: [
+        r"(sub.?human|vermin|parasite|infestation|pest)",
+        r"(they.re|they\s+are)\s+replacing\s+(us|whites?|men)",
+        r"(race|white).?traitor",
+        r"(deport|remove|expel)\s+(them|all|every)",
+        r"go\s+back\s+to",
+        r"(globalist|zog|nwo).{0,20}(control|agenda|plan)",
+        r"of\s+course\s+it\s+was\s+a\s+\w+",
+        r"typical\s+\w+\s+(behavior|move|response)",
+        r"(white|demographic)\s+genocide",
+        r"(round\s+up|cleanse|purge).{0,20}(them|[a-z]+s)",
+    ],
+
+    WoundType.SEXUAL_EXPLOIT: [
+        r"only\s*fans?\s+(model|girl|content|leak)",
+        r"thirst\s+trap",
+        r"(financial|fin)\s*dom(ination)?",
+        r"pay\s*pig",
+        r"(using|manipulat\w+)\s+(men|guys)\s+(for|with)\s+(money|sex|attention)",
+        r"men\s+are\s+(easy|stupid|simple|weak)\s+(targets?|prey|marks?)",
+        r"(sex|body|looks)\s+sells",
+        r"(simps?|simping)\s+(pay|send|give)",
+        r"link\s+in\s+(bio|profile).{0,20}(exclusive|nsfw|18\+)",
+        r"(attention|validation)\s+farming",
+    ],
+}
+
+# Compile all patterns at module load
+_COMPILED_PATTERNS: Dict[WoundType, List[re.Pattern]] = {
+    wt: [re.compile(p, re.IGNORECASE | re.DOTALL) for p in patterns]
+    for wt, patterns in WOUND_PATTERNS.items()
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYER 2 — Fuzzy lexicon seeds
+# Short phrases — fuzzy matched against sliding windows of the text
+# These are the "last hug 4 years ago" anchors that expand via similarity
+# ══════════════════════════════════════════════════════════════════════════════
+
+WOUND_FUZZY_SEEDS: Dict[WoundType, List[str]] = {
+
+    WoundType.LONELINESS: [
+        "no one checks on men",
+        "nobody checks on men",
+        "affection desert",
+        "touch starved",
+        "last hug years ago",
+        "haven't been hugged",
+        "haven't been touched",
+        "men are invisible",
+        "died alone",
+        "no one would notice",
+        "remember every compliment",
+        "flowers when they're dead",
+        "male loneliness epidemic",
+        "no one asks how I'm doing",
+        "last time someone held me",
+        "years without human touch",
+        "men don't get hugs",
+        "affection desert for men",
+        "touch in years",
+        "no physical contact",
+    ],
+
+    WoundType.HUMILIATION: [
+        "beta male behavior",
+        "low value men",
+        "what happened to real men",
+        "men have become weak",
+        "simping pathetic",
+        "emasculated by society",
+        "not a real man",
+        "men are spineless now",
+    ],
+
+    WoundType.BETRAYAL: [
+        "they lied to men",
+        "you've been lied to",
+        "red pill truth",
+        "blue pill delusion",
+        "divorce rape",
+        "family court bias",
+        "false rape accusation",
+        "women destroyed society",
+        "wake up sheep",
+    ],
+
+    WoundType.IMPOTENCE: [
+        "it's over",
+        "blackpill truth",
+        "nothing matters anymore",
+        "why bother trying",
+        "system is rigged against men",
+        "no future for men",
+        "looksmaxxing failed",
+        "giving up on women",
+        "monk mode forever",
+    ],
+
+    WoundType.ENVY_SPITE: [
+        "diversity hire not merit",
+        "men built civilization",
+        "without men everything collapses",
+        "hypergamy destroys relationships",
+        "unfair to men",
+        "they don't deserve it",
+    ],
+
+    WoundType.NOSTALGIA: [
+        "real men used to",
+        "before feminism ruined",
+        "traditional values lost",
+        "great replacement happening",
+        "western civilization dying",
+        "simpler times for men",
+        "lost generation of men",
+    ],
+
+    WoundType.HATRED: [
+        "they're replacing us",
+        "demographic replacement",
+        "of course it was one of them",
+        "typical behavior",
+        "send them back",
+        "white genocide",
+    ],
+
+    WoundType.SEXUAL_EXPLOIT: [
+        "using men for money",
+        "men are easy targets",
+        "financial domination paypig",
+        "onlyfans manipulation",
+        "attention farming from simps",
+        "sex sells men are stupid",
+    ],
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LAYER 3 — Semantic anchor phrases
+# Embedded once at init. Cosine similarity against input text chunks.
+# ══════════════════════════════════════════════════════════════════════════════
+
+WOUND_SEMANTIC_ANCHORS: Dict[WoundType, List[str]] = {
+
+    WoundType.LONELINESS: [
+        "Men suffer from a lack of physical affection and nobody talks about it",
+        "I haven't been hugged by anyone in years and it's destroying me",
+        "Male loneliness is an epidemic that society refuses to acknowledge",
+        "Men die alone and nobody checks on them until it's too late",
+        "I remember every single compliment I've ever received because there were so few",
+    ],
+
+    WoundType.HUMILIATION: [
+        "Men have been emasculated by modern society and feminism",
+        "Being a man today means being mocked and called weak",
+        "Society has destroyed what it means to be a real man",
+    ],
+
+    WoundType.BETRAYAL: [
+        "Everything men were told about relationships was a lie",
+        "The system is designed to destroy men through divorce and false accusations",
+        "Women and media have been deceiving men for decades",
+    ],
+
+    WoundType.IMPOTENCE: [
+        "There is no point in trying because the system is completely rigged against men",
+        "Men have no future in this society and giving up makes sense",
+        "Nothing you do as a man will ever be enough or appreciated",
+    ],
+
+    WoundType.ENVY_SPITE: [
+        "Men built everything in civilization and now get nothing in return",
+        "Women get every advantage while men are punished for existing",
+        "Meritocracy is dead and men suffer because of diversity quotas",
+    ],
+
+    WoundType.NOSTALGIA: [
+        "Things were so much better before feminism changed everything",
+        "Traditional gender roles worked and destroying them ruined society",
+        "Western civilization is being deliberately replaced and destroyed",
+    ],
+
+    WoundType.HATRED: [
+        "They are deliberately replacing the native population through immigration",
+        "Certain groups are parasites on society that need to be removed",
+        "White people are being genocided through demographic replacement",
+    ],
+
+    WoundType.SEXUAL_EXPLOIT: [
+        "Women use their bodies to manipulate and financially exploit desperate men",
+        "OnlyFans and findom are systems designed to exploit lonely men",
+        "Men are easy targets for sexual and financial manipulation by women",
+    ],
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Result types
+# ══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class WoundMatch:
+    """A single match with its source layer."""
+    wound_type: WoundType
+    layer: int          # 1=regex, 2=fuzzy, 3=semantic
+    score: float        # raw match score (1.0 for regex, similarity for others)
+    matched_text: str   # what triggered the match
+    pattern: str        # which pattern/seed matched
+
+
+@dataclass
+class WoundScore:
+    """Classification result for a single piece of content."""
+    text: str
+    scores: Dict[WoundType, float] = field(default_factory=dict)
+    dominant: WoundType = WoundType.NEUTRAL
+    confidence: float = 0.0
+    matches: List[WoundMatch] = field(default_factory=list)
+    is_wound_content: bool = False
+    layers_used: List[int] = field(default_factory=list)
+
+    @property
+    def top_wounds(self) -> List[Tuple[WoundType, float]]:
+        return sorted(
+            [(wt, s) for wt, s in self.scores.items() if s > 0],
+            key=lambda x: -x[1],
+        )
+
+    @property
+    def wound_vector(self) -> List[float]:
+        return [
+            self.scores.get(wt, 0.0)
+            for wt in WoundType
+            if wt != WoundType.NEUTRAL
+        ]
+
+    @property
+    def matched_terms(self) -> Dict[WoundType, List[str]]:
+        out: Dict[WoundType, List[str]] = {}
+        for m in self.matches:
+            out.setdefault(m.wound_type, []).append(m.matched_text)
+        return out
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Fuzzy matching helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _fuzzy_score(a: str, b: str) -> float:
+    """Return similarity score 0-100 between two strings."""
+    if _FUZZY_LIB == "rapidfuzz":
+        return _fuzz.partial_ratio(a.lower(), b.lower())
+    elif _FUZZY_LIB == "difflib":
+        return _SM(None, a.lower(), b.lower()).ratio() * 100
+    return 0.0
+
+
+def _sliding_window_fuzzy(
+    text: str,
+    seed: str,
+    threshold: float = FUZZY_THRESHOLD,
+    window_words: int = 12,
+) -> Optional[Tuple[float, str]]:
+    """
+    Slide a window over the text and fuzzy-match against seed.
+    Returns (score, matched_window) if threshold met, else None.
+    """
+    words = text.split()
+    seed_len = len(seed.split())
+    win_size = max(seed_len, window_words)
+
+    best_score = 0.0
+    best_window = ""
+
+    for i in range(max(1, len(words) - win_size + 1)):
+        window = " ".join(words[i:i + win_size])
+        score = _fuzzy_score(seed, window)
+        if score > best_score:
+            best_score = score
+            best_window = window
+
+    if best_score >= threshold:
+        return best_score, best_window
+    return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main classifier
+# ══════════════════════════════════════════════════════════════════════════════
+
+class WoundClassifier:
+    """
+    Three-layer wound type classifier.
+
+    Layer 1: Regex patterns — handles numerical variation, family matching
+    Layer 2: Fuzzy matching — handles paraphrase, spelling variation
+    Layer 3: Semantic embedding — handles conceptual similarity
+
+    Runs layers in order, stops when a match is found.
+    All matches are traced to their source for interpretability.
+
+    Usage:
+        clf = WoundClassifier()
+        result = clf.classify("I haven't been hugged in 3 years")
+        print(result.dominant)        # WoundType.LONELINESS
+        print(result.layers_used)     # [1]
+
+        result = clf.classify("last time someone held me was before covid")
+        print(result.dominant)        # WoundType.LONELINESS
+        print(result.layers_used)     # [2]
+    """
+
+    def __init__(
+        self,
+        use_semantic: bool = True,
+        semantic_model: str = SEMANTIC_MODEL,
+        fuzzy_threshold: float = FUZZY_THRESHOLD,
+        semantic_threshold: float = SEMANTIC_THRESHOLD,
+        min_score_threshold: float = 0.0,
+    ) -> None:
+        self.fuzzy_threshold = fuzzy_threshold
+        self.semantic_threshold = semantic_threshold
+        self.min_score_threshold = min_score_threshold
+        self._model = None
+
+        if use_semantic and _SEMANTIC_AVAILABLE:
+            try:
+                logger.info("Loading semantic model %s...", semantic_model)
+                self._model = SentenceTransformer(semantic_model)
+                # Pre-encode all anchors
+                self._anchor_embeddings: Dict[WoundType, any] = {}
+                for wt, anchors in WOUND_SEMANTIC_ANCHORS.items():
+                    self._anchor_embeddings[wt] = self._model.encode(
+                        anchors, convert_to_tensor=True, show_progress_bar=False
+                    )
+                logger.info("Semantic layer ready.")
+            except Exception as e:
+                logger.warning("Semantic model load failed: %s", e)
+                self._model = None
+        elif use_semantic and not _SEMANTIC_AVAILABLE:
+            logger.info(
+                "Semantic layer requested but sentence-transformers not installed."
+            )
+
+    # ------------------------------------------------------------------
+    # Layer 1: Regex
+    # ------------------------------------------------------------------
+
+    def _layer1_regex(self, text: str) -> List[WoundMatch]:
+        matches = []
+        for wt, patterns in _COMPILED_PATTERNS.items():
+            for pat in patterns:
+                for m in pat.finditer(text):
+                    matches.append(WoundMatch(
+                        wound_type=wt,
+                        layer=1,
+                        score=1.0,
+                        matched_text=m.group(0),
+                        pattern=pat.pattern,
+                    ))
+        return matches
+
+    # ------------------------------------------------------------------
+    # Layer 2: Fuzzy
+    # ------------------------------------------------------------------
+
+    def _layer2_fuzzy(self, text: str) -> List[WoundMatch]:
+        if not _FUZZY_LIB:
+            return []
+        matches = []
+        for wt, seeds in WOUND_FUZZY_SEEDS.items():
+            for seed in seeds:
+                result = _sliding_window_fuzzy(
+                    text, seed, threshold=self.fuzzy_threshold
+                )
+                if result:
+                    score, window = result
+                    matches.append(WoundMatch(
+                        wound_type=wt,
+                        layer=2,
+                        score=score / 100.0,
+                        matched_text=window,
+                        pattern=seed,
+                    ))
+        return matches
+
+    # ------------------------------------------------------------------
+    # Layer 3: Semantic
+    # ------------------------------------------------------------------
+
+    def _layer3_semantic(self, text: str) -> List[WoundMatch]:
+        if not self._model:
+            return []
+        matches = []
+        try:
+            text_emb = self._model.encode(
+                text, convert_to_tensor=True, show_progress_bar=False
+            )
+            for wt, anchor_embs in self._anchor_embeddings.items():
+                sims = st_util.cos_sim(text_emb, anchor_embs)[0]
+                max_sim = float(sims.max())
+                max_idx = int(sims.argmax())
+                if max_sim >= self.semantic_threshold:
+                    matches.append(WoundMatch(
+                        wound_type=wt,
+                        layer=3,
+                        score=max_sim,
+                        matched_text=text[:100],
+                        pattern=WOUND_SEMANTIC_ANCHORS[wt][max_idx],
+                    ))
+        except Exception as e:
+            logger.warning("Semantic classification failed: %s", e)
+        return matches
+
+    # ------------------------------------------------------------------
+    # Main classify
+    # ------------------------------------------------------------------
+
+    def classify(self, text: str) -> WoundScore:
+        if not text or not text.strip():
+            return WoundScore(text=text, dominant=WoundType.NEUTRAL)
+
+        all_matches: List[WoundMatch] = []
+        layers_used: List[int] = []
+
+        # Layer 1 always runs
+        l1 = self._layer1_regex(text)
+        if l1:
+            all_matches.extend(l1)
+            layers_used.append(1)
+
+        # Layer 2 runs if no regex hit
+        if not l1:
+            l2 = self._layer2_fuzzy(text)
+            if l2:
+                all_matches.extend(l2)
+                layers_used.append(2)
+
+        # Layer 3 runs if neither hit
+        if not l1 and not all_matches:
+            l3 = self._layer3_semantic(text)
+            if l3:
+                all_matches.extend(l3)
+                layers_used.append(3)
+
+        if not all_matches:
+            return WoundScore(
+                text=text,
+                dominant=WoundType.NEUTRAL,
+                is_wound_content=False,
+                layers_used=[],
+            )
+
+        # Aggregate scores per wound type
+        # Weight by layer: L1=1.0, L2=0.85, L3=0.75
+        layer_weights = {1: 1.0, 2: 0.85, 3: 0.75}
+        word_count = max(1, len(text.split()))
+        scores: Dict[WoundType, float] = {}
+
+        for m in all_matches:
+            w = layer_weights[m.layer] * m.score
+            # Density normalization for L1 (regex hits per word)
+            if m.layer == 1:
+                w = w / word_count * 10  # scale back up
+            wound_type = m.wound_type
+            scores[wound_type] = scores.get(wound_type, 0.0) + w
+
+        dominant = max(scores, key=scores.get)
+        total = sum(scores.values())
+        confidence = scores[dominant] / total if total > 0 else 0.0
+
+        return WoundScore(
+            text=text,
+            scores=scores,
+            dominant=dominant,
+            confidence=confidence,
+            matches=all_matches,
+            is_wound_content=True,
+            layers_used=layers_used,
+        )
+
+    def classify_batch(self, texts: List[str]) -> List[WoundScore]:
+        return [self.classify(t) for t in texts]
+
+    def dominant_wound(self, posts: List[str]) -> WoundType:
+        agg: Dict[WoundType, float] = {}
+        for text in posts:
+            result = self.classify(text)
+            for wt, score in result.scores.items():
+                agg[wt] = agg.get(wt, 0.0) + score
+        if not agg:
+            return WoundType.NEUTRAL
+        return max(agg, key=agg.get)
+
+
+__all__ = [
+    "WoundType", "WoundScore", "WoundMatch", "WoundClassifier",
+    "WOUND_PATTERNS", "WOUND_FUZZY_SEEDS", "WOUND_SEMANTIC_ANCHORS",
+]
+
+
+================================================================================
+  FILE : scrapers/bluesky_client.py
+  EXT  : .py
+================================================================================
+
+"""
+bluesky_client.py — Bluesky AT Protocol client for SpiralWatch Feeder Node Identifier
+
+No API key required. All data is public via the AT Protocol.
+The firehose is open. This is the right place to start.
+
+Pulls:
+  - Posts matching a seed (keyword, URL, or DID)
+  - Reply graphs around those posts
+  - Author profiles for reply graph participants
+  - Follower/following lists for audience quality scoring
+
+Rate limits: Bluesky public AppView allows ~3000 req/hour unauthenticated.
+Authenticated (free account) raises this significantly.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Iterator, List, Optional, Dict, Any
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+BSKY_API = "https://public.api.bsky.app/xrpc"
+DEFAULT_RATE_LIMIT = 3000  # requests per hour unauthenticated
+
+
+@dataclass
+class BSkyPost:
+    """Normalized Bluesky post."""
+    uri: str                          # at://did.../app.bsky.feed.post/...
+    cid: str
+    author_did: str
+    author_handle: str
+    text: str
+    timestamp: float                  # epoch seconds
+    reply_count: int = 0
+    repost_count: int = 0
+    like_count: int = 0
+    quote_count: int = 0
+    reply_to_uri: Optional[str] = None   # parent post URI if this is a reply
+    root_uri: Optional[str] = None       # root of the thread
+    langs: List[str] = field(default_factory=list)
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def engagement(self) -> int:
+        return self.reply_count + self.repost_count + self.like_count + self.quote_count
+
+    @property
+    def engagement_to_follower_ratio(self) -> Optional[float]:
+        """Populated externally once author profile is fetched."""
+        return self.raw.get("_engagement_ratio")
+
+
+@dataclass
+class BSkyAuthor:
+    """Normalized Bluesky author profile."""
+    did: str
+    handle: str
+    display_name: str = ""
+    description: str = ""
+    followers_count: int = 0
+    follows_count: int = 0
+    posts_count: int = 0
+    created_at: float = 0.0
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def follower_to_following_ratio(self) -> float:
+        """High ratio = influential. Low ratio = follows many, few follow back."""
+        if self.follows_count == 0:
+            return float(self.followers_count)
+        return self.followers_count / self.follows_count
+
+    @property
+    def account_age_days(self) -> float:
+        if not self.created_at:
+            return 0.0
+        return (time.time() - self.created_at) / 86400
+
+
+class BlueSkyClient:
+    """
+    AT Protocol client for SpiralWatch feeder node analysis.
+
+    Usage:
+        client = BlueSkyClient()
+
+        # Seed by keyword
+        posts = list(client.search_posts("loneliness men no one checks"))
+
+        # Pull reply graph around a post
+        thread = client.get_thread(post_uri)
+
+        # Get author profile
+        author = client.get_author(did_or_handle)
+
+        # Get followers (for audience quality scoring)
+        followers = list(client.get_followers(did_or_handle, limit=500))
+    """
+
+    def __init__(
+        self,
+        handle: Optional[str] = None,
+        app_password: Optional[str] = None,
+        rate_limit_per_hour: int = DEFAULT_RATE_LIMIT,
+    ) -> None:
+        self.handle = handle
+        self.app_password = app_password
+        self._session_token: Optional[str] = None
+        self._did: Optional[str] = None
+        self._min_interval = 3600.0 / rate_limit_per_hour
+        self._last_call = 0.0
+        self._call_count = 0
+
+        if handle and app_password:
+            self._authenticate()
+
+    # ------------------------------------------------------------------
+    # Auth (optional — unauthenticated works for public data)
+    # ------------------------------------------------------------------
+
+    def _authenticate(self) -> None:
+        resp = self._raw_post(
+            "com.atproto.server.createSession",
+            {"identifier": self.handle, "password": self.app_password},
+            auth=False,
+        )
+        self._session_token = resp.get("accessJwt")
+        self._did = resp.get("did")
+        logger.info("Authenticated as %s (%s)", self.handle, self._did)
+
+    # ------------------------------------------------------------------
+    # Core request machinery
+    # ------------------------------------------------------------------
+
+    def _throttle(self) -> None:
+        elapsed = time.time() - self._last_call
+        if elapsed < self._min_interval:
+            time.sleep(self._min_interval - elapsed)
+        self._last_call = time.time()
+        self._call_count += 1
+
+    def _headers(self) -> Dict[str, str]:
+        h = {"Accept": "application/json"}
+        if self._session_token:
+            h["Authorization"] = f"Bearer {self._session_token}"
+        return h
+
+    def _get(self, method: str, params: Dict[str, Any] = None) -> Dict:
+        self._throttle()
+        url = f"{BSKY_API}/{method}"
+        resp = requests.get(url, params=params or {}, headers=self._headers(), timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _raw_post(self, method: str, body: Dict, auth: bool = True) -> Dict:
+        self._throttle()
+        url = f"{BSKY_API}/{method}"
+        headers = {"Content-Type": "application/json"}
+        if auth and self._session_token:
+            headers["Authorization"] = f"Bearer {self._session_token}"
+        resp = requests.post(url, json=body, headers=headers, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    # ------------------------------------------------------------------
+    # Post parsing
+    # ------------------------------------------------------------------
+
+    def _parse_post(self, view: Dict) -> BSkyPost:
+        """Parse a PostView or ThreadViewPost into a BSkyPost."""
+        post = view.get("post", view)
+        record = post.get("record", {})
+        author = post.get("author", {})
+
+        reply_ref = record.get("reply", {})
+        reply_to = reply_ref.get("parent", {}).get("uri") if reply_ref else None
+        root = reply_ref.get("root", {}).get("uri") if reply_ref else None
+
+        created_at = record.get("createdAt", "")
+        try:
+            from datetime import datetime, timezone
+            ts = datetime.fromisoformat(
+                created_at.replace("Z", "+00:00")
+            ).timestamp()
+        except Exception:
+            ts = 0.0
+
+        return BSkyPost(
+            uri=post.get("uri", ""),
+            cid=post.get("cid", ""),
+            author_did=author.get("did", ""),
+            author_handle=author.get("handle", ""),
+            text=record.get("text", ""),
+            timestamp=ts,
+            reply_count=post.get("replyCount", 0),
+            repost_count=post.get("repostCount", 0),
+            like_count=post.get("likeCount", 0),
+            quote_count=post.get("quoteCount", 0),
+            reply_to_uri=reply_to,
+            root_uri=root,
+            langs=record.get("langs", []),
+            raw=post,
+        )
+
+    def _parse_author(self, profile: Dict) -> BSkyAuthor:
+        created_at = profile.get("createdAt", "")
+        try:
+            from datetime import datetime
+            ts = datetime.fromisoformat(
+                created_at.replace("Z", "+00:00")
+            ).timestamp()
+        except Exception:
+            ts = 0.0
+
+        return BSkyAuthor(
+            did=profile.get("did", ""),
+            handle=profile.get("handle", ""),
+            display_name=profile.get("displayName", ""),
+            description=profile.get("description", ""),
+            followers_count=profile.get("followersCount", 0),
+            follows_count=profile.get("followsCount", 0),
+            posts_count=profile.get("postsCount", 0),
+            created_at=ts,
+            raw=profile,
+        )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def search_posts(
+        self,
+        query: str,
+        limit: int = 100,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        lang: Optional[str] = None,
+        sort: str = "latest",
+    ) -> Iterator[BSkyPost]:
+        """
+        Search posts by keyword/phrase.
+        sort: 'latest' or 'top'
+        """
+        cursor = None
+        fetched = 0
+
+        while fetched < limit:
+            params: Dict[str, Any] = {
+                "q": query,
+                "limit": min(100, limit - fetched),
+                "sort": sort,
+            }
+            if cursor:
+                params["cursor"] = cursor
+            if since:
+                params["since"] = since
+            if until:
+                params["until"] = until
+            if lang:
+                params["lang"] = lang
+
+            try:
+                data = self._get("app.bsky.feed.searchPosts", params)
+            except Exception as e:
+                logger.error("search_posts failed: %s", e)
+                break
+
+            posts = data.get("posts", [])
+            if not posts:
+                break
+
+            for p in posts:
+                yield self._parse_post({"post": p})
+                fetched += 1
+                if fetched >= limit:
+                    break
+
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+
+    def get_thread(
+        self,
+        uri: str,
+        depth: int = 6,
+        parent_height: int = 3,
+    ) -> Dict[str, Any]:
+        """
+        Pull full thread around a post URI.
+        Returns raw thread structure + flattened reply list.
+
+        depth: how many levels of replies to fetch
+        parent_height: how many parent posts to include
+        """
+        try:
+            data = self._get(
+                "app.bsky.feed.getPostThread",
+                {"uri": uri, "depth": depth, "parentHeight": parent_height},
+            )
+        except Exception as e:
+            logger.error("get_thread failed for %s: %s", uri, e)
+            return {"root": None, "replies": []}
+
+        thread = data.get("thread", {})
+        replies = []
+        self._flatten_replies(thread, replies)
+
+        return {
+            "root": self._parse_post(thread) if thread.get("post") else None,
+            "replies": replies,
+            "raw": thread,
+        }
+
+    def _flatten_replies(
+        self, node: Dict, accumulator: List[BSkyPost], depth: int = 0
+    ) -> None:
+        """Recursively flatten a thread tree into a list of BSkyPosts."""
+        if depth > 10:
+            return
+        replies = node.get("replies", [])
+        for r in replies:
+            if r.get("$type") == "app.bsky.feed.defs#threadViewPost":
+                try:
+                    accumulator.append(self._parse_post(r))
+                except Exception:
+                    pass
+                self._flatten_replies(r, accumulator, depth + 1)
+
+    def get_author(self, handle_or_did: str) -> Optional[BSkyAuthor]:
+        """Fetch author profile by handle or DID."""
+        try:
+            data = self._get(
+                "app.bsky.actor.getProfile",
+                {"actor": handle_or_did},
+            )
+            return self._parse_author(data)
+        except Exception as e:
+            logger.error("get_author failed for %s: %s", handle_or_did, e)
+            return None
+
+    def get_followers(
+        self,
+        handle_or_did: str,
+        limit: int = 100,
+    ) -> Iterator[BSkyAuthor]:
+        """Iterate over followers of an account."""
+        cursor = None
+        fetched = 0
+
+        while fetched < limit:
+            params: Dict[str, Any] = {
+                "actor": handle_or_did,
+                "limit": min(100, limit - fetched),
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                data = self._get("app.bsky.graph.getFollowers", params)
+            except Exception as e:
+                logger.error("get_followers failed: %s", e)
+                break
+
+            followers = data.get("followers", [])
+            if not followers:
+                break
+
+            for f in followers:
+                yield self._parse_author(f)
+                fetched += 1
+                if fetched >= limit:
+                    break
+
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+
+    def get_author_feed(
+        self,
+        handle_or_did: str,
+        limit: int = 50,
+    ) -> Iterator[BSkyPost]:
+        """Pull recent posts from an author."""
+        cursor = None
+        fetched = 0
+
+        while fetched < limit:
+            params: Dict[str, Any] = {
+                "actor": handle_or_did,
+                "limit": min(100, limit - fetched),
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                data = self._get("app.bsky.feed.getAuthorFeed", params)
+            except Exception as e:
+                logger.error("get_author_feed failed: %s", e)
+                break
+
+            feed = data.get("feed", [])
+            if not feed:
+                break
+
+            for item in feed:
+                try:
+                    yield self._parse_post(item)
+                    fetched += 1
+                except Exception:
+                    pass
+
+                if fetched >= limit:
+                    break
+
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+
+    def get_likes(
+        self,
+        uri: str,
+        limit: int = 100,
+    ) -> Iterator[BSkyAuthor]:
+        """Who liked a post — useful for audience mapping."""
+        cursor = None
+        fetched = 0
+
+        while fetched < limit:
+            params: Dict[str, Any] = {
+                "uri": uri,
+                "limit": min(100, limit - fetched),
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                data = self._get("app.bsky.feed.getLikes", params)
+            except Exception as e:
+                logger.error("get_likes failed: %s", e)
+                break
+
+            likes = data.get("likes", [])
+            if not likes:
+                break
+
+            for like in likes:
+                actor = like.get("actor", {})
+                yield self._parse_author(actor)
+                fetched += 1
+                if fetched >= limit:
+                    break
+
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+
+    def get_reposted_by(
+        self,
+        uri: str,
+        limit: int = 100,
+    ) -> Iterator[BSkyAuthor]:
+        """Who reposted a post."""
+        cursor = None
+        fetched = 0
+
+        while fetched < limit:
+            params: Dict[str, Any] = {
+                "uri": uri,
+                "limit": min(100, limit - fetched),
+            }
+            if cursor:
+                params["cursor"] = cursor
+
+            try:
+                data = self._get("app.bsky.feed.getRepostedBy", params)
+            except Exception as e:
+                logger.error("get_reposted_by failed: %s", e)
+                break
+
+            accounts = data.get("repostedBy", [])
+            if not accounts:
+                break
+
+            for a in accounts:
+                yield self._parse_author(a)
+                fetched += 1
+                if fetched >= limit:
+                    break
+
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+
+    @property
+    def call_count(self) -> int:
+        return self._call_count
+
+
+__all__ = ["BlueSkyClient", "BSkyPost", "BSkyAuthor"]
+
+
+================================================================================
+  END OF CHUNGUS
+  Files assembled : 7
+  Total lines     : 2,235
+  Total chars     : 77,604
+================================================================================
